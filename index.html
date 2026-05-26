@@ -336,6 +336,7 @@ body {
   <div class="top-btns">
     <button class="btn btn-ghost btn-xs" onclick="openHistory()">📋 ประวัติ</button>
     <button class="btn btn-ghost btn-xs" onclick="exportCSV()">📤 CSV</button>
+    <button class="btn btn-ghost btn-xs" onclick="openReport()" style="color:#059669;border-color:#059669">📊 รายงาน</button>
   </div>
 </div>
 
@@ -380,6 +381,56 @@ body {
     <button class="drawer-close" onclick="closeHistory()">✕</button>
   </div>
   <div class="drawer-body" id="historyBody"></div>
+</div>
+
+<!-- REPORT DRAWER -->
+<div class="drawer-overlay" id="reportOverlay" onclick="closeReport()"></div>
+<div class="drawer" id="reportDrawer">
+  <div class="drawer-handle"></div>
+  <div class="drawer-header">
+    📊 ดาวน์โหลดรายงาน Excel
+    <button class="drawer-close" onclick="closeReport()">✕</button>
+  </div>
+  <div class="drawer-body" style="padding:16px">
+    <div style="display:flex;flex-direction:column;gap:12px">
+      <div style="background:#f0fdf4;border:1px solid #86efac;border-radius:10px;padding:12px;font-size:13px;color:#166534">
+        📋 รายงานจะรวมข้อมูล<b>ทุกวัน</b>ที่เคยเช็คชื่อ แสดงเป็นตาราง นักเรียน × วันที่ พร้อมสรุปยอดรวม
+      </div>
+      <div>
+        <label style="font-size:13px;font-weight:700;color:#374151;display:block;margin-bottom:6px">กองที่ต้องการ</label>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <label style="display:flex;align-items:center;gap:6px;padding:7px 14px;border:2px solid #e5e7eb;border-radius:8px;cursor:pointer;font-size:13px;font-weight:600" id="ropt-all">
+            <input type="radio" name="rptGong" value="all" checked onchange="updateReportPreview()"> ทั้ง 3 กอง
+          </label>
+          <label style="display:flex;align-items:center;gap:6px;padding:7px 14px;border:2px solid #e5e7eb;border-radius:8px;cursor:pointer;font-size:13px;font-weight:600">
+            <input type="radio" name="rptGong" value="0" onchange="updateReportPreview()"> กอง 1
+          </label>
+          <label style="display:flex;align-items:center;gap:6px;padding:7px 14px;border:2px solid #e5e7eb;border-radius:8px;cursor:pointer;font-size:13px;font-weight:600">
+            <input type="radio" name="rptGong" value="1" onchange="updateReportPreview()"> กอง 2
+          </label>
+          <label style="display:flex;align-items:center;gap:6px;padding:7px 14px;border:2px solid #e5e7eb;border-radius:8px;cursor:pointer;font-size:13px;font-weight:600">
+            <input type="radio" name="rptGong" value="2" onchange="updateReportPreview()"> กอง 3
+          </label>
+        </div>
+      </div>
+      <div style="display:flex;gap:10px">
+        <div style="flex:1">
+          <label style="font-size:13px;font-weight:700;color:#374151;display:block;margin-bottom:4px">วันที่เริ่มต้น (ว่าง=ทั้งหมด)</label>
+          <input type="date" id="rptFrom" style="width:100%;border:2px solid #e5e7eb;border-radius:8px;padding:7px 10px;font-size:13px;font-family:inherit" oninput="updateReportPreview()">
+        </div>
+        <div style="flex:1">
+          <label style="font-size:13px;font-weight:700;color:#374151;display:block;margin-bottom:4px">วันที่สิ้นสุด</label>
+          <input type="date" id="rptTo" style="width:100%;border:2px solid #e5e7eb;border-radius:8px;padding:7px 10px;font-size:13px;font-family:inherit" oninput="updateReportPreview()">
+        </div>
+      </div>
+      <div style="background:#f8fafc;border-radius:8px;padding:10px 12px;font-size:13px;color:#4b5563" id="reportPreview">
+        ⏳ กำลังตรวจสอบข้อมูล...
+      </div>
+      <button class="btn btn-success" id="rptDownloadBtn" onclick="generateExcelReport()" style="justify-content:center;padding:12px;font-size:15px">
+        📥 ดาวน์โหลด Excel
+      </button>
+    </div>
+  </div>
 </div>
 
 <!-- FIREBASE SETUP MODAL -->
@@ -443,6 +494,8 @@ body {
 <!-- TOAST -->
 <div class="toast" id="toast"></div>
 
+<!-- SheetJS for Excel export -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <!-- Firebase SDKs -->
 <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-firestore-compat.js"></script>
@@ -1169,6 +1222,188 @@ function closeConfirm() { document.getElementById('confirmModal').classList.remo
 document.getElementById('confBtn').onclick = () => { if(confirmCb) confirmCb(); closeConfirm(); };
 document.getElementById('confirmModal').onclick = e => { if(e.target===e.currentTarget) closeConfirm(); };
 document.getElementById('setupModal').onclick = e => { if(e.target===e.currentTarget) closeSetup(); };
+
+// ==================== REPORT ====================
+let allAttData = {}; // date → { id → {status,note} }
+
+function openReport() {
+  document.getElementById('reportOverlay').classList.add('show');
+  document.getElementById('reportDrawer').classList.add('show');
+  loadAllDataForReport();
+}
+function closeReport() {
+  document.getElementById('reportOverlay').classList.remove('show');
+  document.getElementById('reportDrawer').classList.remove('show');
+}
+
+async function loadAllDataForReport() {
+  document.getElementById('reportPreview').textContent = '⏳ กำลังโหลดข้อมูลทั้งหมด...';
+  allAttData = {};
+
+  // Load from localStorage
+  for (const [date, data] of Object.entries(localSaved)) {
+    allAttData[date] = data;
+  }
+
+  // Load all from Firebase
+  if (db) {
+    try {
+      const snap = await db.collection('attendance').get();
+      snap.docs.forEach(doc => {
+        const parts = doc.id.split('_');
+        if (parts.length < 2) return;
+        const date = parts[0];
+        const docData = doc.data().data || {};
+        if (!allAttData[date]) allAttData[date] = {};
+        for (const [mStr, mData] of Object.entries(docData)) {
+          if (typeof mData === 'object') {
+            for (const [id, val] of Object.entries(mData)) {
+              if (val && val.status) allAttData[date][id] = val;
+            }
+          }
+        }
+      });
+    } catch(e) {}
+  }
+  updateReportPreview();
+}
+
+function getFilteredDates() {
+  const from = document.getElementById('rptFrom').value;
+  const to = document.getElementById('rptTo').value;
+  return Object.keys(allAttData)
+    .filter(d => (!from || d >= from) && (!to || d <= to))
+    .sort();
+}
+
+function updateReportPreview() {
+  const dates = getFilteredDates();
+  const gongVal = document.querySelector('input[name="rptGong"]:checked')?.value || 'all';
+  const gongs = gongVal === 'all' ? GONG_KEYS : [GONG_KEYS[parseInt(gongVal)]];
+  const totalStudents = gongs.reduce((s,gk) => s + Object.values(SCOUT[gk]).flat().length, 0);
+  const prev = document.getElementById('reportPreview');
+  if (dates.length === 0) {
+    prev.innerHTML = '⚠️ ยังไม่มีข้อมูลการเช็คชื่อ';
+    return;
+  }
+  prev.innerHTML = `✅ พบข้อมูล <b>${dates.length} วัน</b> · <b>${totalStudents} คน</b><br>
+    <span style="color:#6b7280;font-size:12px">วันแรก: ${formatThaiDate(dates[0])} &nbsp;|&nbsp; วันล่าสุด: ${formatThaiDate(dates[dates.length-1])}</span>`;
+}
+
+function formatThaiDate(dateStr) {
+  if (!dateStr) return '';
+  const [y,m,d] = dateStr.split('-');
+  const mn = ['','ม.ค.','ก.พ.','มี.ค.','เม.ย.','พ.ค.','มิ.ย.','ก.ค.','ส.ค.','ก.ย.','ต.ค.','พ.ย.','ธ.ค.'];
+  return `${parseInt(d)} ${mn[parseInt(m)]} ${parseInt(y)+543}`;
+}
+
+async function generateExcelReport() {
+  const btn = document.getElementById('rptDownloadBtn');
+  btn.textContent = '⏳ กำลังสร้างรายงาน...';
+  btn.disabled = true;
+
+  const dates = getFilteredDates();
+  if (dates.length === 0) { showToast('ไม่มีข้อมูลในช่วงที่เลือก', 'warn'); btn.textContent='📥 ดาวน์โหลด Excel'; btn.disabled=false; return; }
+
+  const gongVal = document.querySelector('input[name="rptGong"]:checked')?.value || 'all';
+  const targetGongs = gongVal === 'all' ? GONG_KEYS.map((_,i)=>i) : [parseInt(gongVal)];
+
+  const wb = XLSX.utils.book_new();
+
+  for (const gi of targetGongs) {
+    const gk = GONG_KEYS[gi];
+    const ws_data = [];
+
+    // ===== Title rows =====
+    ws_data.push([`รายงานการเข้าร่วมกิจกรรมลูกเสืออากาศ ม.1 ${gk}`, ...Array(dates.length + 7).fill('')]);
+    ws_data.push([`โรงเรียนหนองหานวิทยา ปีการศึกษา 2569  |  จัดทำ: ${formatThaiDate(new Date().toISOString().split('T')[0])}`, ...Array(dates.length + 7).fill('')]);
+    ws_data.push([]); // blank row
+
+    // ===== Header row =====
+    const thDateHeaders = dates.map(d => formatThaiDate(d));
+    ws_data.push(['ลำดับ', 'หมู่', 'รหัส', 'ชื่อ - สกุล', 'ห้อง', ...thDateHeaders, 'รวมมา', 'รวมขาด', 'รวมลา', '%เข้าร่วม']);
+
+    // ===== Data rows =====
+    for (const [mStr, students] of Object.entries(SCOUT[gk])) {
+      const mNum = parseInt(mStr);
+      for (const s of students) {
+        let ma=0, khad=0, la=0;
+        const dayVals = dates.map(date => {
+          const v = allAttData[date]?.[s.id]?.status || '';
+          if(v==='มา'){ma++;return'✓'} if(v==='ขาด'){khad++;return'ข'} if(v==='ลา'){la++;return'ล'} return'';
+        });
+        const pct = dates.length > 0 ? Math.round((ma/dates.length)*100) : 0;
+        ws_data.push([s.no, `หมู่ ${mNum}`, s.id, s.name, `ม.${s.room}`, ...dayVals, ma, khad, la, `${pct}%`]);
+      }
+      // Subtotal row per มู่
+      const subMa = dates.map(date => students.filter(s=>allAttData[date]?.[s.id]?.status==='มา').length);
+      ws_data.push(['', `รวมหมู่ ${mNum}`, '', `(${students.length} คน)`, '', ...subMa,
+        students.reduce((a,s)=>a+(dates.filter(d=>allAttData[d]?.[s.id]?.status==='มา').length),0),'','','']);
+    }
+
+    // ===== Grand total row =====
+    ws_data.push([]);
+    const allStudents = Object.values(SCOUT[gk]).flat();
+    const totalMa = allStudents.reduce((a,s)=>a+dates.filter(d=>allAttData[d]?.[s.id]?.status==='มา').length,0);
+    const totalKhad = allStudents.reduce((a,s)=>a+dates.filter(d=>allAttData[d]?.[s.id]?.status==='ขาด').length,0);
+    const totalLa = allStudents.reduce((a,s)=>a+dates.filter(d=>allAttData[d]?.[s.id]?.status==='ลา').length,0);
+    ws_data.push(['รวมทั้ง'+gk,'','',`${allStudents.length} คน`,'',
+      ...dates.map(date=>allStudents.filter(s=>allAttData[date]?.[s.id]?.status==='มา').length),
+      totalMa, totalKhad, totalLa, '']);
+
+    const ws = XLSX.utils.aoa_to_sheet(ws_data);
+
+    // Column widths
+    ws['!cols'] = [
+      {wch:7},{wch:8},{wch:9},{wch:28},{wch:7},
+      ...dates.map(()=>({wch:10})),
+      {wch:8},{wch:8},{wch:8},{wch:9}
+    ];
+
+    // Merge title cells
+    ws['!merges'] = [
+      {s:{r:0,c:0}, e:{r:0,c:dates.length+8}},
+      {s:{r:1,c:0}, e:{r:1,c:dates.length+8}},
+    ];
+
+    XLSX.utils.book_append_sheet(wb, ws, gk);
+  }
+
+  // Sheet สรุปรวม (จำนวนวันเข้าเรียนรายคน)
+  const sum_data = [];
+  sum_data.push(['สรุปจำนวนวันเข้าร่วมกิจกรรมลูกเสืออากาศ ม.1', ...Array(6).fill('')]);
+  sum_data.push([`โรงเรียนหนองหานวิทยา ปีการศึกษา 2569  |  จำนวนวันทั้งหมด: ${dates.length} วัน`, ...Array(6).fill('')]);
+  sum_data.push([]);
+  sum_data.push(['กอง', 'หมู่', 'ลำดับ', 'รหัส', 'ชื่อ - สกุล', 'ห้อง', 'วันที่มา', 'วันที่ขาด', 'วันที่ลา', '%เข้าร่วม', 'หมายเหตุ']);
+
+  for (const gi of targetGongs) {
+    const gk = GONG_KEYS[gi];
+    for (const [mStr, students] of Object.entries(SCOUT[gk])) {
+      for (const s of students) {
+        let ma=0,khad=0,la=0;
+        dates.forEach(d=>{
+          const v=allAttData[d]?.[s.id]?.status||'';
+          if(v==='มา')ma++; else if(v==='ขาด')khad++; else if(v==='ลา')la++;
+        });
+        const pct = dates.length > 0 ? Math.round((ma/dates.length)*100) : 0;
+        const remark = pct < 80 ? '⚠️ ต่ำกว่า 80%' : '';
+        sum_data.push([gk, `หมู่ ${mStr}`, s.no, s.id, s.name, `ม.${s.room}`, ma, khad, la, `${pct}%`, remark]);
+      }
+    }
+  }
+
+  const ws_sum = XLSX.utils.aoa_to_sheet(sum_data);
+  ws_sum['!cols'] = [{wch:8},{wch:8},{wch:7},{wch:9},{wch:28},{wch:7},{wch:9},{wch:9},{wch:8},{wch:10},{wch:14}];
+  ws_sum['!merges'] = [{s:{r:0,c:0},e:{r:0,c:10}},{s:{r:1,c:0},e:{r:1,c:10}}];
+  XLSX.utils.book_append_sheet(wb, ws_sum, 'สรุปรวม');
+
+  // Download
+  const today = new Date().toISOString().split('T')[0];
+  XLSX.writeFile(wb, `รายงานลูกเสืออากาศ_${today}.xlsx`);
+  btn.textContent = '📥 ดาวน์โหลด Excel';
+  btn.disabled = false;
+  showToast('📊 ดาวน์โหลดรายงาน Excel แล้ว', 'success');
+}
 
 // ==================== INIT ====================
 function init() {
