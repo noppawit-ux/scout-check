@@ -675,6 +675,16 @@ const SCOUT = {
 };
 const GONG_KEYS = Object.keys(SCOUT); // ["กอง1","กอง2","กอง3"]
 
+// ==================== FIREBASE CONFIG (ฝังตรง) ====================
+const FIREBASE_CONFIG = {
+  apiKey: "AIzaSyD-TT_QzRK9x4KxOymV80IUL3iubIojvwI",
+  authDomain: "sample-firebase-ai-app-1f38e.firebaseapp.com",
+  projectId: "sample-firebase-ai-app-1f38e",
+  storageBucket: "sample-firebase-ai-app-1f38e.firebasestorage.app",
+  messagingSenderId: "418627237553",
+  appId: "1:418627237553:web:75ac33143438cc86e01490"
+};
+
 // ==================== STATE ====================
 let curGong = 0; // index into GONG_KEYS
 let curMoo = 1;
@@ -1172,14 +1182,8 @@ function init() {
   // Build UI
   buildGongNav();
 
-  // Firebase
-  const cfg = getStoredConfig();
-  if (cfg && cfg.apiKey) {
-    initFirebase(cfg);
-  } else {
-    setSyncStatus('');
-    loadForDate();
-  }
+  // Firebase — เชื่อมต่ออัตโนมัติทันที
+  initFirebase(FIREBASE_CONFIG);
 }
 init();
 </script>
