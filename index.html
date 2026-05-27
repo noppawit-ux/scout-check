@@ -184,21 +184,39 @@ body {
 }
 .note-inp:focus { outline: none; border-color: var(--blue); background: white; }
 
-/* ===== FAB (Floating Save Button) ===== */
-.fab {
-  position: fixed; bottom: 20px; right: 16px; z-index: 200;
-  width: 58px; height: 58px; border-radius: 50%;
-  background: var(--green); color: white; border: none; cursor: pointer;
-  font-size: 24px; box-shadow: 0 4px 16px rgba(5,150,105,0.4);
-  display: flex; align-items: center; justify-content: center;
-  transition: all 0.2s;
+/* ===== FAB Sync Status ===== */
+.fab-sync {
+  position: fixed; bottom: 20px; right: 12px; z-index: 200;
+  background: white; border-radius: 20px; padding: 8px 14px;
+  display: flex; align-items: center; gap: 6px;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.15); font-size: 13px; font-weight: 700;
+  color: var(--green-dark); border: 2px solid var(--green-light);
+  transition: all 0.3s; pointer-events: none;
 }
-.fab:active { transform: scale(0.92); }
-.fab.pulse { animation: fabPulse 2s infinite; }
-@keyframes fabPulse {
-  0%,100%{box-shadow: 0 4px 16px rgba(5,150,105,0.4);}
-  50%{box-shadow: 0 4px 24px rgba(5,150,105,0.7);}
+.fab-sync.syncing { color: var(--yellow-dark); border-color: var(--yellow-light); }
+.fab-sync.error { color: var(--red-dark); border-color: var(--red-light); }
+.fab-sync.remote { color: var(--blue-dark); border-color: var(--blue-light); animation: remoteFlash 0.5s ease; }
+@keyframes remoteFlash { 0%{transform:scale(1.05)} 100%{transform:scale(1)} }
+
+/* Remote update card flash */
+.student-card.remote-flash {
+  animation: cardFlash 1.2s ease;
 }
+@keyframes cardFlash {
+  0%{background:#dbeafe} 40%{background:#dbeafe} 100%{background:white}
+}
+.student-card.status-ขาด.remote-flash { animation: cardFlashRed 1.2s ease; }
+@keyframes cardFlashRed {
+  0%{background:#fecaca} 40%{background:#fecaca} 100%{background:#fff8f8}
+}
+
+/* Saving spinner on card */
+.card-saving {
+  width: 14px; height: 14px; border-radius: 50%;
+  border: 2px solid #e5e7eb; border-top-color: var(--blue);
+  animation: spin 0.7s linear infinite; flex-shrink: 0;
+}
+@keyframes spin { to{transform:rotate(360deg)} }
 
 /* ===== HISTORY PANEL ===== */
 .drawer-overlay {
@@ -354,7 +372,7 @@ body {
 <div class="date-bar">
   <label>📅</label>
   <input type="date" id="checkDate">
-  <span class="save-status unsaved" id="saveStatus">⚡ ยังไม่บันทึก</span>
+  <span class="save-status saved" id="saveStatus">🔄 เรียลไทม์</span>
   <div class="top-btns">
     <button class="btn btn-ghost btn-xs" onclick="openHistory()">📋 ประวัติ</button>
     <button class="btn btn-ghost btn-xs" onclick="exportCSV()">📤 CSV</button>
@@ -392,7 +410,10 @@ body {
 </div>
 
 <!-- FAB Save -->
-<button class="fab" id="fabSave" onclick="saveAttendance()">💾</button>
+<div class="fab-sync" id="fabSync" title="สถานะการซิงค์">
+  <span id="fabIcon">✅</span>
+  <span id="fabLabel">ซิงค์แล้ว</span>
+</div>
 
 <!-- HISTORY DRAWER -->
 <div class="drawer-overlay" id="drawerOverlay" onclick="closeHistory()"></div>
@@ -781,13 +802,19 @@ const FIREBASE_CONFIG = {
 };
 
 // ==================== STATE ====================
-let curGong = 0; // index into GONG_KEYS
+let curGong = 0;
 let curMoo = 1;
-let attendance = {}; // key: `id` → {status, note}
-let localSaved = {}; // all saved data in localStorage
-let hasUnsaved = false;
+let attendance = {};     // id → {status, note}
+let localSaved = {};     // date → attendance snapshot (localStorage backup)
 let db = null;
-let isSaving = false;
+let rtListeners = [];    // Firestore onSnapshot unsubscribe functions
+let noteDebounce = {};   // debounce timers for note saves
+let isSyncing = false;   // throttle write bursts
+let syncQueue = new Set(); // student ids queued for save
+let deviceId = localStorage.getItem('scout_device_id') || (() => {
+  const id = 'dev_' + Math.random().toString(36).slice(2,8);
+  localStorage.setItem('scout_device_id', id); return id;
+})();
 const LS_ATT = 'scout_att_2569';
 const LS_CFG = 'scout_fb_cfg';
 
@@ -802,14 +829,161 @@ function startFirebase(cfg) {
   try {
     firebase.initializeApp(cfg);
     db = firebase.firestore();
+    // Enable offline persistence
+    db.enablePersistence({ synchronizeTabs: true }).catch(() => {});
     setSyncStatus('online');
-    showToast('🔥 เชื่อมต่อ Firebase แล้ว', 'success');
+    showToast('🔥 เชื่อมต่อ Firebase แล้ว — เรียลไทม์', 'success');
     loadForDate();
   } catch(e) {
     db = null; setSyncStatus('error');
     showToast('❌ Firebase config ผิดพลาด', 'error');
+    loadForDate(); // Load from localStorage as fallback
   }
 }
+
+// ===== REAL-TIME LISTENERS =====
+function setupRealtimeListeners(date) {
+  // Tear down old listeners
+  rtListeners.forEach(u => u());
+  rtListeners = [];
+  if (!db || !date) return;
+
+  GONG_KEYS.forEach(gk => {
+    const unsub = db.collection('attendance').doc(fbDocId(date, gk))
+      .onSnapshot({ includeMetadataChanges: false }, snap => {
+        if (!snap.exists) return;
+        // hasPendingWrites = true means this is our own optimistic update
+        if (snap.metadata.hasPendingWrites) return;
+        const remoteData = snap.data().data || {};
+        mergeRemoteData(gk, remoteData);
+      }, () => {});
+    rtListeners.push(unsub);
+  });
+}
+
+function mergeRemoteData(gk, remoteData) {
+  let changed = [];
+  for (const [mStr, mData] of Object.entries(remoteData)) {
+    if (typeof mData !== 'object') continue;
+    for (const [id, val] of Object.entries(mData)) {
+      if (!val) continue;
+      const cur = attendance[id];
+      if (!cur || cur.status !== val.status || cur.note !== val.note) {
+        attendance[id] = { ...val };
+        changed.push(id);
+        // Flash card if visible
+        const card = document.getElementById(`card-${id}`);
+        if (card) {
+          card.classList.remove('remote-flash');
+          void card.offsetWidth; // reflow
+          card.classList.add('remote-flash');
+          const st = val.status || '';
+          card.className = `student-card${st?' status-'+st:''} remote-flash`;
+          // Update buttons
+          card.querySelectorAll('.att-btn').forEach(btn => {
+            btn.className = 'att-btn' + (btn.textContent.includes('✅')&&st==='มา'?' sel-มา':
+                                         btn.textContent.includes('❌')&&st==='ขาด'?' sel-ขาด':
+                                         btn.textContent.includes('📋')&&st==='ลา'?' sel-ลา':'');
+          });
+          const noteEl = card.querySelector('.note-inp');
+          if (noteEl && noteEl !== document.activeElement) noteEl.value = val.note || '';
+          setTimeout(() => {
+            if(card) card.classList.remove('remote-flash');
+          }, 1500);
+        }
+      }
+    }
+  }
+  if (changed.length) {
+    updateSummary();
+    updateMooBtn(curMoo);
+    backupToLocal();
+    setFabSync('remote', `🔄 อัปเดต ${changed.length} คน`);
+  }
+}
+
+// ===== AUTO-SAVE =====
+function findStudentGongMoo(id) {
+  for (const gk of GONG_KEYS) {
+    for (const [mStr, students] of Object.entries(SCOUT[gk])) {
+      if (students.find(s => s.id === id)) return { gk, moo: mStr };
+    }
+  }
+  return null;
+}
+
+async function autoSave(id) {
+  const date = document.getElementById('checkDate').value;
+  if (!date) return;
+  // Always backup to localStorage
+  backupToLocal();
+
+  if (!db) return;
+  const info = findStudentGongMoo(id);
+  if (!info) return;
+  const val = attendance[id] || {};
+  setFabSync('syncing', '⏳ กำลังบันทึก...');
+  try {
+    await db.collection('attendance').doc(fbDocId(date, info.gk)).set({
+      data: { [info.moo]: { [id]: val } },
+      updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
+      device: deviceId
+    }, { merge: true });
+    setFabSync('saved', '✅ ซิงค์แล้ว');
+  } catch(e) {
+    setFabSync('error', '⚠️ ออฟไลน์');
+  }
+}
+
+function autoSaveDebounced(id, delay=800) {
+  clearTimeout(noteDebounce[id]);
+  noteDebounce[id] = setTimeout(() => autoSave(id), delay);
+}
+
+// Batch save all visible moo (for markAllMa / clearAllMoo)
+async function autoSaveMoo() {
+  const date = document.getElementById('checkDate').value;
+  if (!date) return;
+  backupToLocal();
+  if (!db) return;
+  const gk = GONG_KEYS[curGong];
+  const students = SCOUT[gk][curMoo] || [];
+  const mooData = {};
+  students.forEach(s => { mooData[s.id] = attendance[s.id] || {}; });
+  setFabSync('syncing', '⏳ กำลังบันทึก...');
+  try {
+    await db.collection('attendance').doc(fbDocId(date, gk)).set({
+      data: { [curMoo]: mooData },
+      updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
+      device: deviceId
+    }, { merge: true });
+    setFabSync('saved', '✅ ซิงค์แล้ว');
+  } catch(e) {
+    setFabSync('error', '⚠️ ออฟไลน์');
+  }
+}
+
+function backupToLocal() {
+  const date = document.getElementById('checkDate').value;
+  if (!date) return;
+  localSaved[date] = JSON.parse(JSON.stringify(attendance));
+  localStorage.setItem(LS_ATT, JSON.stringify(localSaved));
+}
+
+function setFabSync(state, label) {
+  const fab = document.getElementById('fabSync');
+  const icon = document.getElementById('fabIcon');
+  const lbl = document.getElementById('fabLabel');
+  if (!fab) return;
+  fab.className = 'fab-sync' + (state==='syncing'?' syncing':state==='error'?' error':state==='remote'?' remote':'');
+  icon.textContent = state==='syncing'?'⏳':state==='error'?'⚠️':state==='remote'?'🔄':'✅';
+  lbl.textContent = label;
+  if (state === 'saved' || state === 'remote') {
+    clearTimeout(fab._timer);
+    fab._timer = setTimeout(() => setFabSync('idle','✅ ซิงค์แล้ว'), 3000);
+  }
+}
+function setFabIdle() { setFabSync('idle','✅ ซิงค์แล้ว'); }
 function setSyncStatus(s) {
   const d = document.getElementById('syncDot');
   d.className = 'sync-dot ' + s;
@@ -1034,12 +1208,12 @@ function setAtt(id, val) {
   }
   updateSummary();
   updateMooBtn(curMoo);
-  markUnsaved();
+  autoSave(id);
 }
 function setNote(id, val) {
   if (!attendance[id]) attendance[id] = {};
   attendance[id].note = val;
-  markUnsaved();
+  autoSaveDebounced(id);
 }
 
 // ==================== QUICK ACTIONS ====================
@@ -1052,7 +1226,7 @@ function markAllMa() {
   });
   buildStudentList();
   updateMooBtn(curMoo);
-  markUnsaved();
+  autoSaveMoo();
 }
 function clearAllMoo() {
   const gk = GONG_KEYS[curGong];
@@ -1060,49 +1234,15 @@ function clearAllMoo() {
   students.forEach(s => { delete attendance[s.id]; });
   buildStudentList();
   updateMooBtn(curMoo);
-  markUnsaved();
+  autoSaveMoo();
 }
 
-// ==================== SAVE / LOAD ====================
-function markUnsaved() {
-  hasUnsaved = true;
-  document.getElementById('saveStatus').className = 'save-status unsaved';
-  document.getElementById('saveStatus').textContent = '⚡ ยังไม่บันทึก';
-  document.getElementById('fabSave').classList.add('pulse');
-}
-function markSaved() {
-  hasUnsaved = false;
-  document.getElementById('saveStatus').className = 'save-status saved';
-  document.getElementById('saveStatus').textContent = '✅ บันทึกแล้ว';
-  document.getElementById('fabSave').classList.remove('pulse');
-}
-
-async function saveAttendance() {
-  if (isSaving) return;
-  const date = document.getElementById('checkDate').value;
-  if (!date) { showToast('กรุณาเลือกวันที่', 'warn'); return; }
-  isSaving = true;
-
-  // Save to localStorage always
-  localSaved[date] = JSON.parse(JSON.stringify(attendance));
-  localStorage.setItem(LS_ATT, JSON.stringify(localSaved));
-
-  // Save to Firebase if connected
-  if (db) {
-    const ok = await fbSave(date);
-    if (ok) { markSaved(); showToast('💾 บันทึกสำเร็จ (Firebase + Local)', 'success'); }
-    else { markSaved(); showToast('💾 บันทึก Local แล้ว (Firebase ล้มเหลว)', 'warn'); }
-  } else {
-    markSaved();
-    showToast('💾 บันทึก Local เรียบร้อย', 'success');
-  }
-  isSaving = false;
-}
-
+// ==================== LOAD ====================
 async function loadForDate() {
   const date = document.getElementById('checkDate').value;
   if (!date) return;
   attendance = {};
+  setFabSync('syncing', '⏳ กำลังโหลด...');
 
   // Try Firebase first
   if (db) {
@@ -1116,9 +1256,11 @@ async function loadForDate() {
           }
         }
       }
-      markSaved();
+      backupToLocal();
       buildStudentList();
       buildMooBar();
+      setupRealtimeListeners(date);
+      setFabSync('saved', '✅ ซิงค์แล้ว');
       return;
     }
   }
@@ -1127,14 +1269,12 @@ async function loadForDate() {
   const stored = localSaved[date];
   if (stored) {
     attendance = JSON.parse(JSON.stringify(stored));
-    markSaved();
-  } else {
-    markSaved();
-    document.getElementById('saveStatus').className = 'save-status unsaved';
-    document.getElementById('saveStatus').textContent = '⚡ ยังไม่บันทึก';
   }
   buildStudentList();
   buildMooBar();
+  // Still set up real-time listeners so new data from other devices arrives
+  setupRealtimeListeners(date);
+  setFabSync('saved', db ? '✅ ซิงค์แล้ว' : '💾 Local');
 }
 
 // ==================== HISTORY ====================
